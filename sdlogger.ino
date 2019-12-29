@@ -1,8 +1,24 @@
-
+/**
+ * This program logs data to a binary file.  Functions are included
+ * to convert the binary file to a csv text file.
+ *
+ * Samples are logged at regular intervals.  The maximum logging rate
+ * depends on the quality of your SD card and the time required to
+ * read sensor data.  This example has been tested at 500 Hz with
+ * good SD card on an Uno.  4000 HZ is possible on a Due.
+ *
+ * If your SD card has a long write latency, it may be necessary to use
+ * slower sample rates.  Using a Mega Arduino helps overcome latency
+ * problems since 12 512 byte buffers will be used.
+ *
+ * Data is written to the file using a SD multiple block write command.
+ */
 #include <SPI.h>
 #include "SdFat.h"
 #include "FreeStack.h"
 #include "UserTypes.h"
+#include "RTClib.h"
+
 
 #ifdef __AVR_ATmega328P__
 #include "MinimumSerial.h"
@@ -16,18 +32,19 @@ MinimumSerial MinSerial;
 #define ABORT_ON_OVERRUN 1
 //------------------------------------------------------------------------------
 //Interval between data records in microseconds.
-const uint32_t LOG_INTERVAL_USEC = 2000;
+const uint32_t LOG_INTERVAL_USEC = 5000; // Minimo valore dato dal sensore
 //------------------------------------------------------------------------------
 // Set USE_SHARED_SPI non-zero for use of an SPI sensor.
 // May not work for some cards.
 #ifndef USE_SHARED_SPI
 #define USE_SHARED_SPI 0
 #endif  // USE_SHARED_SPI
+#define WDT_YIELD_TIME_MICROS 0 // In realta il watchdog non rompe e si puo mettere a zero
 //------------------------------------------------------------------------------
 // Pin definitions.
-//
+// t
 // SD chip select pin.
-const uint8_t SD_CS_PIN = SS;
+const uint8_t SD_CS_PIN = 10; // Mia scheda
 //
 // Digital pin to indicate an error, set to -1 if not used.
 // The led blinks for fatal errors. The led goes on solid for
@@ -89,6 +106,8 @@ char binName[FILE_NAME_DIM] = FILE_BASE_NAME "00.bin";
 SdFat sd;
 
 SdBaseFile binFile;
+
+RTC_DS1307 rtc;
 
 // Number of data records in a block.
 const uint16_t DATA_DIM = (512 - 4)/sizeof(data_t);
@@ -263,6 +282,7 @@ void createBinFile() {
     }
     bgnErase = endErase + 1;
   }
+  Serial.println(F("\nCreated new file"));
 }
 //------------------------------------------------------------------------------
 // dump data file to Serial
@@ -299,12 +319,15 @@ void logData() {
   recordBinFile();
   renameBinFile();
 }
+void deleteData() {
+  sd.remove("mpuraw##.bin");
+}
 //------------------------------------------------------------------------------
 void openBinFile() {
   char name[FILE_NAME_DIM];
   strcpy(name, binName);
   Serial.println(F("\nEnter two digit version"));
-  //Serial.write(name, BASE_NAME_SIZE);
+  Serial.write(name, BASE_NAME_SIZE);
   for (int i = 0; i < 2; i++) {
     while (!Serial.available()) {
      SysCall::yield();
@@ -366,7 +389,7 @@ void recordBinFile() {
     error("writeStart failed");
   }
   Serial.print(F("FreeStack: "));
-  Serial.println(FreeStack());
+  Serial.println(FreeStack());   // No implementation on ESP8266
   Serial.println(F("Logging - type any character to stop"));
   bool closeFile = false;
   uint32_t bn = 0;
@@ -375,11 +398,10 @@ void recordBinFile() {
   uint32_t overrunTotal = 0;
   uint32_t logTime = micros();
   while(1) {
-     // Time for next data record.
-    logTime += LOG_INTERVAL_USEC;
     if (Serial.available()) {
       closeFile = true;
     }
+    
     if (closeFile) {
       if (curBlock != 0) {
         // Put buffer in full queue.
@@ -397,7 +419,12 @@ void recordBinFile() {
         curBlock->overrun = overrun;
         overrun = 0;
       }
-      if ((int32_t)(logTime - micros()) < 0) {
+       // Time for next data record.
+      logTime += LOG_INTERVAL_USEC;   // better in this place
+    
+      if ((uint32_t)(logTime - micros()) < 0) {// modify in uint
+        Serial.print(logTime);
+        Serial.print(micros());
         error("Rate too fast");
       }
       int32_t delta;
@@ -480,6 +507,7 @@ void recoverTmpFile() {
     return;
   }
   if (binFile.read(&count, 2) != 2 || count != DATA_DIM) {
+    //sd.remove("mpuraw##.bin");
     error("Please delete existing " TMP_FILE_NAME);
   }
   Serial.println(F("\nRecovering data in tmp file " TMP_FILE_NAME));
@@ -554,9 +582,17 @@ void setup(void) {
   while (!Serial) {
     SysCall::yield();
   }
+ 
+  if (! rtc.isrunning()) {
+    Serial.println(F("\nRTC is NOT running: setting timestamp"));
+    // following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
   Serial.print(F("\nFreeStack: "));
   Serial.println(FreeStack());
-  Serial.print(F("Records/block: "));
+  Serial.print(F("\nBuffer: "));
+  Serial.print(BUFFER_BLOCK_COUNT);
+  Serial.print(F("\nRecords/block: "));
   Serial.println(DATA_DIM);
   if (sizeof(block_t) != 512) {
     error("Invalid block size");
@@ -593,6 +629,7 @@ void loop(void) {
   do {
     delay(10);
   } while (Serial.available() && Serial.read() >= 0);
+ 
   Serial.println();
   Serial.println(F("type:"));
   Serial.println(F("b - open existing bin file"));
@@ -601,6 +638,7 @@ void loop(void) {
   Serial.println(F("e - overrun error details"));
   Serial.println(F("l - list files"));
   Serial.println(F("r - record data"));
+  Serial.println(F("k - remove mpuraw data"));
   Serial.println(F("t - test without logging"));
   while(!Serial.available()) {
     SysCall::yield();
@@ -633,6 +671,8 @@ void loop(void) {
     sd.ls(&Serial, LS_SIZE);
   } else if (c == 'r') {
     logData();
+  } else if (c == 'k') {
+    deleteData();
   } else if (c == 't') {
     testSensor();
   } else {
